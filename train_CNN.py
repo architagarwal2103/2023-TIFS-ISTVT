@@ -19,6 +19,8 @@ from dataset.transform import xception_default_data_transforms,xception_default_
 from dataset.mydataset import MyDataset
 from dataset.dataset_video import *
 from dataset.dataset_oulu import OULU
+from dataset.dataset_faceforensics import FaceForensics, Celeb, VideoSeqDataset
+from dataset.dataset_faceforensics import FaceForensics, Celeb, VideoSeqDataset
 from torch.utils.tensorboard import SummaryWriter   
 
 
@@ -47,6 +49,7 @@ def main():
     lam_rep = args.lambda_representation
     lam_rec = args.lambda_rec
     lam_vrec = args.lambda_vrec
+    lam_lmrec = args.lambda_lmrec
     lam_adv = args.lambda_adversarial
     re_encode = args.re_encode
     sub_dataset = args.sub_dataset
@@ -64,6 +67,7 @@ def main():
     data_type = args.data_type
     dq = args.diverse_quality
     seq_len = args.sequence_length
+    num_videos = args.num_videos
 
     os.environ['CUDA_VISIBLE_DEVICES']=device_no
     if save_dir=='same': 
@@ -162,15 +166,19 @@ def main():
     if sub_dataset == 'OULU':
         train_dataset = OULU(num_multi = num_multi,mode = 'Train',shuffle_min_slice = min_slice)
         val_dataset = OULU(mode = 'Val',num_multi = num_multi)
-    elif sub_dataset == 'Celeb':
-        train_dataset = Celeb(num_multi = num_multi,mode = 'Train',shuffle_min_slice = min_slice,require_idx = model_name[0:15] == 'jigsaw_multi_xcep',compress_param = comp_prarm,pair_return = model_name == 'jigsaw_multi_xcep_adv_pair',fixed_qual = True)
-        val_dataset = Celeb(mode = 'Test',num_multi = num_multi,compress_param = comp_prarm, random_test_qual = True, pair_return = False)
+    elif sub_dataset == 'FaceForensics' or sub_dataset == 'Celeb':
+        train_dataset = FaceForensics(root_dir='./data/FF++', mode='Train', transform=transform['train'] if transform else None, 
+                                     num_multi=num_multi, require_idx=model_name[0:15] == 'jigsaw_multi_xcep', seq_len=seq_len, num_videos=num_videos)
+        val_dataset = FaceForensics(root_dir='./data/FF++', mode='Test', transform=transform['val'] if transform else None, 
+                                   num_multi=num_multi, seq_len=seq_len, num_videos=num_videos)
     elif sub_dataset == 'DFDC':
-        train_dataset = Celeb(num_multi = num_multi,mode = 'Train',shuffle_min_slice = min_slice,require_idx = model_name[0:15] == 'jigsaw_multi_xcep',compress_param = comp_prarm,pair_return = model_name == 'jigsaw_multi_xcep_adv_pair',fixed_qual = True)
-        val_dataset = Celeb(mode = 'Test',num_multi = num_multi,compress_param = comp_prarm, random_test_qual = True, pair_return = False)
+        train_dataset = FaceForensics(root_dir='./data/FF++', mode='Train', transform=transform['train'] if transform else None, 
+                                     num_multi=num_multi, require_idx=model_name[0:15] == 'jigsaw_multi_xcep', seq_len=seq_len, num_videos=num_videos)
+        val_dataset = FaceForensics(root_dir='./data/FF++', mode='Test', transform=transform['val'] if transform else None, 
+                                   num_multi=num_multi, seq_len=seq_len, num_videos=num_videos)
     else:
-        train_dataset = VideoSeqDataset(quality = data_quality, transform=transform['train'],get_triplet=triplet_type,subset=None if mix else sub_dataset,require_landmarks= model_name == 'quadnet_landmark',num_multi=num_multi,shuffle_min_slice = min_slice,require_idx = model_name[0:13] == 'jigsaw_multi_',random_compress = ex_comp,compress_param = comp_prarm,size=input_size,mode='Train',dataset_len=60000,frame_type=data_type,diverse_quality = dq, seq_len = seq_len)
-        val_dataset = VideoSeqDataset(quality = data_quality, transform=transform['val'],get_triplet='Test',num_multi = num_multi, subset=None if mix else sub_dataset, return_fake_type = mix,dataset_len=20000, mode= 'Test',size=input_size,frame_type=data_type, seq_len = seq_len)
+        train_dataset = VideoSeqDataset(quality = data_quality, transform=transform['train'],get_triplet=triplet_type,subset=None if mix else sub_dataset,require_landmarks= model_name == 'quadnet_landmark',num_multi=num_multi,shuffle_min_slice = min_slice,require_idx = model_name[0:13] == 'jigsaw_multi_',random_compress = ex_comp,compress_param = comp_prarm,size=input_size,mode='Train',dataset_len=60000,frame_type=data_type,diverse_quality = dq, seq_len = seq_len, num_videos = num_videos)
+        val_dataset = VideoSeqDataset(quality = data_quality, transform=transform['val'],get_triplet='Test',num_multi = num_multi, subset=None if mix else sub_dataset, return_fake_type = mix,dataset_len=20000, mode= 'Test',size=input_size,frame_type=data_type, seq_len = seq_len, num_videos = num_videos)
         #train_dataset = MyDataset(index_range=(0,train_length), transform=transform['train'],get_triplet=triplet_type,subset=sub_dataset,require_landmarks=model_name == 'quadnet_landmark')
         #val_dataset = MyDataset(index_range=(train_length,train_length+val_length),transform=transform['val'],get_triplet='Test',subset='Classic',use_white_list=triplet_type=='QuadCirc',num_multi = num_multi)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False, num_workers=8)
@@ -228,7 +236,8 @@ def main():
             solver.train()
             comp_clas.train()
         except:
-            print('No solver!')
+            #print('No solver!')
+            pass
         train_loss = 0.0
         train_corrects = 0.0
         val_loss = 0.0
@@ -482,8 +491,9 @@ def main():
                         train_corrects += iter_corrects
                         iteration += 1
                         if iteration == 1:
-                            import ipdb
+                            # import ipdb
                             #ipdb.set_trace()
+                            pass
                         if not (iteration % 1000):
                             print('iteration {} train loss: {:.4f} solver loss: {:.4f} qual. loss:{:.4f} dstill loss:{:.4f} Acc: {:.4f}'.format(iteration, iter_loss / batch_size, solver_loss / batch_size , ccls_loss / batch_size, distll_loss / batch_size , iter_corrects / (batch_size *(1 if epoch < pretrain_epochs else 2)))) 
 
@@ -513,6 +523,12 @@ def main():
                         optimizer.zero_grad()
                         if model_name == 'fusion_efficientnet':
                             outputs,mfcs=model(image)
+                        elif model_name == 'xception' and len(image.shape) == 5:
+                            # Handle sequence data for xception
+                            outputs = 0
+                            for fidx in range(seq_len):
+                                frame_output = model(image[:,fidx,:,:,:])
+                                outputs += frame_output
                         else:
                             outputs = model(image)
 
@@ -774,7 +790,7 @@ def main():
                     train_loss += iter_loss
                     iteration += 1
                     if not (iteration % 1000):
-                        print('iteration {} train loss: {:.4f} Acc: {:.4f}'.format(iteration, iter_loss / batch_size, iter_correctmuts / (batch_size*3)))
+                        print('iteration {} train loss: {:.4f} Acc: {:.4f}'.format(iteration, iter_loss / batch_size, iter_corrects / (batch_size*3)))
 
                 epoch_loss = train_loss / (3 * train_dataset_size / batch_size)
                 epoch_acc = train_corrects / (3 * train_dataset_size)
@@ -811,6 +827,7 @@ def main():
                             for o in out:
                                 _, preds = torch.max(o, 1)
                                 iter_corrects += torch.sum(preds == label).to(torch.float32)
+                                iter_corrects += torch.sum(preds == label).to(torch.float32)
 
 
                     train_corrects += iter_corrects
@@ -839,7 +856,8 @@ def main():
             solver.eval()
             comp_clas.eval()
         except:
-            print('No solver!')
+            #print('No solver!')
+            pass
         with torch.no_grad():
             test_multi = False
             if test_multi:
@@ -1055,4 +1073,5 @@ if __name__ == '__main__':
     parse.add_argument('--data_type','-dt',type=str,default='normal')
     parse.add_argument('--diverse_quality','-dq',type=bool,default=False)
     parse.add_argument('--sequence_length','-sl',type=int,default=4)
+    parse.add_argument('--num_videos','-nv',type=int,default=10, help='Number of videos to use for training/testing')
     main()

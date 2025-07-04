@@ -80,6 +80,7 @@ class TripletLoss(nn.Module):
             idx = hard_samples_mining(f_anchor, f_positive, f_negative, self.margin)
         
         d_ap = torch.norm(f_anchor[idx] - f_positive[idx], dim = 1)  # (-1,1)
+        d_an = torch.norm(f_anchor[idx] - f_negative[idx], dim = 1)  # (-1,1)
           
         return torch.clamp(d_ap - d_an + self.margin,0).mean()
         
@@ -235,116 +236,95 @@ class TotalLoss(nn.Module):
         return cla_loss + trip_loss + reg_loss
 
 class ClaTripletLoss(nn.Module):
-    def __init__(self,lam_t=0.3):
-        super(ClaTripletLoss,self).__init__()
-        self.cla = nn.CrossEntropyLoss()
-        self.trip = nn.TripletMarginLoss()
+    def __init__(self, lam_t=1.0):
+        super(ClaTripletLoss, self).__init__()
         self.lam_t = lam_t
-
-    def forward(self, classification, feature, labels):
-
-        classification_anchor, classification_positive, classification_negative = classification
-
-        cla_loss =  self.cla(classification_anchor[labels==0], torch.tensor([0] * classification_anchor[labels==0].size(0), dtype = torch.long).cuda()) + \
-                    self.cla(classification_anchor[labels==1], torch.tensor([1] * classification_anchor[labels==1].size(0), dtype = torch.long).cuda()) +  \
-                    self.cla(classification_positive[labels==0], torch.tensor([0] * classification_positive[labels==0].size(0), dtype = torch.long).cuda()) + \
-                    self.cla(classification_positive[labels==1], torch.tensor([1] * classification_positive[labels==1].size(0), dtype = torch.long).cuda()) + \
-                    self.cla(classification_negative[labels==0], torch.tensor([1] * classification_negative[labels==0].size(0), dtype = torch.long).cuda()) + \
-                    self.cla(classification_negative[labels==1], torch.tensor([0] * classification_negative[labels==1].size(0), dtype = torch.long).cuda())
+        self.triplet_loss = nn.TripletMarginLoss(margin=0.2)
+        self.classification_loss = nn.CrossEntropyLoss()
         
-        trip_loss = self.trip(feature[0],feature[1],feature[2])
-        if torch.isnan(cla_loss):
-            cla_loss=0
-        if torch.isnan(trip_loss):
-            trip_loss=0
+    def forward(self, feat, cla, labels):
+        # Classification loss
+        cla_loss = 0
+        for i, c in enumerate(cla):
+            if i == 2:  # negative sample
+                target = 1 - labels
+            else:
+                target = labels
+            cla_loss += self.classification_loss(c, target)
+        
+        # Triplet loss
+        anchor_feat, positive_feat, negative_feat = feat
+        trip_loss = self.triplet_loss(anchor_feat, positive_feat, negative_feat)
+        
         return cla_loss + self.lam_t * trip_loss
 
 class JigsawLoss(nn.Module):
     def __init__(self):
-        super(JigsawLoss,self).__init__()
-        self.c_dict = {}
-        for i in range(20):
-            self.c_dict[i*i] = i
+        super(JigsawLoss, self).__init__()
+        self.loss = nn.CrossEntropyLoss()
+        
+    def forward(self, pred, target):
+        return self.loss(pred, target)
 
-    def forward(self,idx_pred,idx):
-        loss = 0
-        l = idx_pred.shape[1] // 2
-        c = self.c_dict[l]
-        pred_x = idx_pred[:,0:l]
-        pred_y = idx_pred[:,l:] 
-        real_x = idx // c
-        real_y = idx % c
-        loss_jigsaw = torch.sum(torch.sqrt((pred_x - real_x)**2 + (pred_y - real_y)**2)) / (len(idx_pred) * idx_pred.shape[1] / 2)
-        return loss_jigsaw
-
-class SingleCenterLoss(nn.Module):
+class CompressionCls(nn.Module):
     def __init__(self):
-        super(SingleCenterLoss,self).__init__()
+        super(CompressionCls, self).__init__()
+        self.fc = nn.Linear(2048, 2)
+        
+    def forward(self, x):
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
 
+class JigsawSolverConv(nn.Module):
+    def __init__(self, num_patches, feat_dim):
+        super(JigsawSolverConv, self).__init__()
+        self.fc = nn.Linear(feat_dim, num_patches)
+        
+    def forward(self, x):
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
 
-def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    """计算Gram/核矩阵
-    source: sample_size_1 * feature_size 的数据
-    target: sample_size_2 * feature_size 的数据
-    kernel_mul: 这个概念不太清楚，感觉也是为了计算每个核的bandwith
-    kernel_num: 表示的是多核的数量
-    fix_sigma: 表示是否使用固定的标准差
+class QuadnetReEncoder(nn.Module):
+    def __init__(self):
+        super(QuadnetReEncoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1)
+        )
+        
+    def forward(self, x):
+        feat = self.encoder(x)
+        return feat, feat
 
-        return: (sample_size_1 + sample_size_2) * (sample_size_1 + sample_size_2)的
-                        矩阵，表达形式:
-                        [   K_ss K_st
-                            K_ts K_tt ]
-    """
-    n_samples = int(source.size()[0])+int(target.size()[0])
-    total = torch.cat([source, target], dim=0) # 合并在一起
-   
-    total0 = total.unsqueeze(0).expand(int(total.size(0)), \
-                                       int(total.size(0)), \
-                                       int(total.size(1)))
-    total1 = total.unsqueeze(1).expand(int(total.size(0)), \
-                                       int(total.size(0)), \
-                                       int(total.size(1)))
-    L2_distance = ((total0-total1)**2).sum(2) # 计算高斯核中的|x-y|
-   
-    # 计算多核中每个核的bandwidth
-    if fix_sigma:
-        bandwidth = fix_sigma
-    else:
-        bandwidth = torch.sum(L2_distance.data) / (n_samples**2-n_samples)
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
-   
-    # 高斯核的公式，exp(-|x-y|/bandwith)
-    kernel_val = [torch.exp(-L2_distance / bandwidth_temp) for \
-                  bandwidth_temp in bandwidth_list]
+class QuadnetDecoder(nn.Module):
+    def __init__(self, use_swish=True):
+        super(QuadnetDecoder, self).__init__()
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, 4, stride=2, padding=1),
+            nn.Tanh()
+        )
+        
+    def forward(self, x):
+        return self.decoder(x)
 
-    return sum(kernel_val) # 将多个核合并在一起
- 
-def mmd(sources, targets, qual, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    pool = nn.AdaptiveAvgPool2d(output_size = 1)
-    sources = pool(sources).squeeze()
-    targets = pool(targets).squeeze()
-    batch_size = 1
-    sources = torch.cat((sources[qual==1],targets[qual==0]),0)
-    targets = torch.cat((targets[qual==1],sources[qual==0]),0)
-    loss = 0
-    for source,target in zip (sources,targets):
-        kernels = guassian_kernel(source, target,
-                                  kernel_mul=kernel_mul,    
-                                    kernel_num=kernel_num,  
-                                  fix_sigma=fix_sigma)
-        XX = kernels[:batch_size, :batch_size] # Source<->Source
-        YY = kernels[batch_size:, batch_size:] # Target<->Target
-        XY = kernels[:batch_size, batch_size:] # Source<->Target
-        YX = kernels[batch_size:, :batch_size] # Target<->Source
-        loss += torch.mean(XX + YY - XY -YX) # 这里是假定X和Y的样本数量是相同的
-                                                                            # 当不同的时候，就需要乘上上面的M矩阵
-    return loss
-
-if __name__ == "__main__":
-    regression = [torch.randn(1,3,24,24), torch.randn(1,3,24,24), torch.randn(1,3,24,24)]
-    classification = [torch.randn(1,2), torch.randn(1,2), torch.randn(1,2)]
-    feat = [[torch.randn(1,16),torch.randn(1,16)],[torch.randn(1,16),torch.randn(1,16)],[torch.randn(1,16),torch.randn(1,16)]]
-    labels = torch.tensor([0],dtype = torch.long)
-    loss_fn = TotalLoss()
-    res = loss_fn(regression, classification, feat, labels)
+class QuadnetLandmarkDecoder(nn.Module):
+    def __init__(self, use_swish=True):
+        super(QuadnetLandmarkDecoder, self).__init__()
+        self.decoder = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 136)  # 68 landmarks * 2 coordinates
+        )
+        
+    def forward(self, x):
+        x = x.view(x.size(0), -1)
+        return self.decoder(x)

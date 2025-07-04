@@ -15,8 +15,10 @@ def return_pytorch04_xception(pretrained=False):
         # Load model in torch 0.4+
         model.fc = model.last_linear
         del model.last_linear
-        state_dict = torch.load(
-            '/mnt/data/DFD/xception-b5690688.pth')
+        # Download pretrained model instead of loading from hardcoded path
+        import torch.utils.model_zoo as model_zoo
+        state_dict = model_zoo.load_url(
+            'http://data.lip6.fr/cadene/pretrainedmodels/xception-b5690688.pth')
         for name, weights in state_dict.items():
             if 'pointwise' in name:
                 state_dict[name] = weights.unsqueeze(-1).unsqueeze(-1)
