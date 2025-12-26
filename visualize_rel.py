@@ -182,6 +182,13 @@ def main():
     elif sub_dataset == 'Celeb':
         train_dataset = Celeb(num_multi = num_multi,mode = 'Train',shuffle_min_slice = min_slice,require_idx = model_name[0:15] == 'jigsaw_multi_xcep',compress_param = comp_prarm,pair_return = model_name == 'jigsaw_multi_xcep_adv_pair',fixed_qual = True)
         val_dataset = Celeb(mode = 'Vis',num_multi = num_multi,compress_param = comp_prarm, random_test_qual = True, pair_return = False)
+    elif sub_dataset == 'FaceForensics':
+        # Use FaceForensics dataset for visualization
+        from dataset.dataset_faceforensics import FaceForensics
+        train_dataset = FaceForensics(root_dir='./data/FF++', mode='Train', transform=transform['train'] if transform else None, 
+                                     num_multi=num_multi, seq_len=1, num_videos=20)
+        val_dataset = FaceForensics(root_dir='./data/FF++', mode='Test', transform=transform['val'] if transform else None, 
+                                   num_multi=num_multi, seq_len=1, num_videos=20)
     else:
         train_dataset = VideoSeqDataset(quality = data_quality, transform=transform['train'],get_triplet=triplet_type,subset=None if mix else sub_dataset,require_landmarks= model_name == 'quadnet_landmark',num_multi=num_multi,shuffle_min_slice = min_slice,require_idx = model_name[0:13] == 'jigsaw_multi_',random_compress = ex_comp,compress_param = comp_prarm,size=input_size,mode='Train',dataset_len=60000,frame_type=data_type,diverse_quality = dq)
         val_dataset = VideoSeqDataset(quality = data_quality, transform=transform['val'],get_triplet='Test',num_multi = num_multi, subset=None if mix else sub_dataset, return_fake_type = mix,dataset_len=20000, mode= 'Vis',size=input_size,frame_type=data_type, seq_len = 6)
@@ -247,52 +254,230 @@ def main():
                 image,labels,ftype  = ret
             else:
                 image,labels = ret
-            image_t, image_o = image
-            if num_multi == 0:
-                image_t = image_t
+            
+            # Handle different dataset formats
+            if isinstance(image, tuple) and len(image) == 2:
+                # VideoSeqDataset format: (image_t, image_o)
+                image_t, image_o = image
+                if num_multi == 0:
+                    image_t = image_t
+                else:
+                    for i in range(len(image)):
+                        image_t[i] = image_t[i]['image']
             else:
-                for i in range(len(image)):
-                    image_t[i] = image_t[i]['image']
+                # FaceForensics dataset format: {'image': tensor}
+                if isinstance(image, dict):
+                    image_t = image['image']
+                else:
+                    image_t = image
+                
+                # For FaceForensics dataset, we'll create visualizations without original image paths
+                image_o = None
             #labels = labels.cuda()
-            cam_s, cam_t = attribution_generator.generate_LRP(image_t, method="transformer_attribution", index=0)
-            cam_s = torch.cat(cam_s,dim=0)
-            cam_t = torch.cat(cam_t,dim=0).transpose(0,1)
-            for i in range(6):
-                transformer_attribution = cam_t[i]
-                transformer_attribution = transformer_attribution.reshape(1,1,19,19)
-                transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
-                transformer_attribution = transformer_attribution.reshape(304, 304).cuda().data.cpu().numpy()
-                transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
-                rgb_img = cv2.resize(cv2.imread(image_o[i][0]),(304,304)) / 255
-                vis = show_cam_on_image(rgb_img, transformer_attribution)
-                vis = np.uint8(255 * vis)
-                vis = np.array(vis)
-                save_dir = './visualize/' + image_o[i][0].split('/')[-2] + '/'
-                try:
-                    os.mkdir(save_dir)
-                except:
-                    pass
-                cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '_t.png', vis)
-                cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '.png', cv2.resize(cv2.imread(image_o[i][0]),(304,304)))
+            try:
+                cam_s, cam_t = attribution_generator.generate_LRP(image_t, method="transformer_attribution", index=0)
+                cam_s = torch.cat(cam_s,dim=0)
+                cam_t = torch.cat(cam_t,dim=0).transpose(0,1)
+                
+                # Debug: print shapes
+                print(f"Debug - image_t shape: {image_t.shape}")
+                print(f"Debug - cam_s shape: {cam_s.shape}")
+                print(f"Debug - cam_t shape: {cam_t.shape}")
+                print(f"Debug - cam_s elements: {cam_s.numel()}")
+                print(f"Debug - cam_t elements: {cam_t.numel()}")
+                
+            except Exception as e:
+                print(f"Error generating LRP attributions: {e}")
+                print(f"Skipping iteration {iteration} due to LRP error")
+                continue
+            
+            # Handle visualization based on dataset format
+            if image_o is not None:
+                # VideoSeqDataset format with image paths
+                for i in range(6):
+                    transformer_attribution = cam_t[i]
+                    transformer_attribution = transformer_attribution.reshape(1,1,19,19)
+                    transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
+                    transformer_attribution = transformer_attribution.reshape(304, 304).cuda().data.cpu().numpy()
+                    transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
+                    rgb_img = cv2.resize(cv2.imread(image_o[i][0]),(304,304)) / 255
+                    vis = show_cam_on_image(rgb_img, transformer_attribution)
+                    vis = np.uint8(255 * vis)
+                    vis = np.array(vis)
+                    save_dir = './visualize/' + image_o[i][0].split('/')[-2] + '/'
+                    try:
+                        os.mkdir(save_dir)
+                    except:
+                        pass
+                    cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '_t.png', vis)
+                    cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '.png', cv2.resize(cv2.imread(image_o[i][0]),(304,304)))
 
-            for i in range(6):
-                transformer_attribution = cam_s[i]
-                transformer_attribution = transformer_attribution.reshape(1,1,19,19)
-                transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
-                transformer_attribution = transformer_attribution.reshape(304, 304).cuda().data.cpu().numpy()
-                transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
-                rgb_img = cv2.resize(cv2.imread(image_o[i][0]),(304,304)) / 255
-                vis = show_cam_on_image(rgb_img, transformer_attribution)
-                vis = np.uint8(255 * vis)
-                vis = np.array(vis)
-                #vis = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
-                save_dir = './visualize/' + image_o[i][0].split('/')[-2] + '/'
-                try:
-                    os.mkdir(save_dir)
-                except:
-                    pass
-                cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '_s.png', vis)
-            if iteration > 1000:
+                for i in range(6):
+                    transformer_attribution = cam_s[i]
+                    transformer_attribution = transformer_attribution.reshape(1,1,19,19)
+                    transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
+                    transformer_attribution = transformer_attribution.reshape(304, 304).cuda().data.cpu().numpy()
+                    transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
+                    rgb_img = cv2.resize(cv2.imread(image_o[i][0]),(304,304)) / 255
+                    vis = show_cam_on_image(rgb_img, transformer_attribution)
+                    vis = np.uint8(255 * vis)
+                    vis = np.array(vis)
+                    save_dir = './visualize/' + image_o[i][0].split('/')[-2] + '/'
+                    try:
+                        os.mkdir(save_dir)
+                    except:
+                        pass
+                    cv2.imwrite(save_dir + image_o[i][0].split('/')[-1] + '_s.png', vis)
+            else:
+                # FaceForensics dataset format - create visualizations from tensor data
+                # Ensure visualize directory exists
+                os.makedirs('./visualize/faceforensics/', exist_ok=True)
+                
+                # Convert image tensor back to numpy for visualization
+                if len(image_t.shape) == 4:  # (batch, channels, height, width)
+                    batch_size_actual = min(image_t.shape[0], 6)  # Process up to 6 images
+                    
+                    for i in range(batch_size_actual):
+                        # Get the original image from tensor (denormalize if needed)
+                        img_tensor = image_t[i]  # (channels, height, width)
+                        
+                        # Convert from tensor to numpy and denormalize
+                        if img_tensor.shape[0] == 3:  # RGB
+                            img_np = img_tensor.permute(1, 2, 0).cpu().numpy()
+                            # Assuming the image is normalized, denormalize it
+                            img_np = (img_np * 255).astype(np.uint8)
+                        else:
+                            img_np = img_tensor.squeeze().cpu().numpy()
+                            img_np = (img_np * 255).astype(np.uint8)
+                        
+                        # Resize to 304x304 for consistency
+                        if len(img_np.shape) == 3:
+                            rgb_img = cv2.resize(img_np, (304, 304)) / 255.0
+                        else:
+                            rgb_img = cv2.resize(img_np, (304, 304))
+                            rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_GRAY2RGB) / 255.0
+                        
+                        # Generate temporal attribution visualization
+                        if i < cam_t.shape[0]:
+                            transformer_attribution = cam_t[i]
+                            print(f"Debug - transformer_attribution shape before reshape: {transformer_attribution.shape}")
+                            
+                            # Handle different attribution tensor shapes
+                            if len(transformer_attribution.shape) == 2:
+                                # Shape is [H, W] - already spatial dimensions
+                                transformer_attribution = transformer_attribution.cpu().numpy()
+                                # Resize to 304x304 for visualization
+                                transformer_attribution = cv2.resize(transformer_attribution, (304, 304))
+                            elif len(transformer_attribution.shape) == 3:
+                                # Shape might be [C, H, W] - take mean or first channel
+                                if transformer_attribution.shape[0] == 1:
+                                    transformer_attribution = transformer_attribution.squeeze(0).cpu().numpy()
+                                else:
+                                    transformer_attribution = transformer_attribution.mean(0).cpu().numpy()
+                                transformer_attribution = cv2.resize(transformer_attribution, (304, 304))
+                            else:
+                                print(f"Unexpected attribution shape: {transformer_attribution.shape}")
+                                continue
+                                
+                            # Normalize attribution values to [0, 1]
+                            transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
+                            
+                            vis = show_cam_on_image(rgb_img, transformer_attribution)
+                            vis = np.uint8(255 * vis)
+                            cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_img_{i}_temporal.png', vis)
+                        
+                        # Generate spatial attribution visualization
+                        if i < cam_s.shape[0]:
+                            spatial_attribution = cam_s[i]
+                            print(f"Debug - spatial_attribution shape before reshape: {spatial_attribution.shape}")
+                            
+                            # Handle different attribution tensor shapes
+                            if len(spatial_attribution.shape) == 2:
+                                # Shape is [H, W] - already spatial dimensions
+                                spatial_attribution = spatial_attribution.cpu().numpy()
+                                # Resize to 304x304 for visualization
+                                spatial_attribution = cv2.resize(spatial_attribution, (304, 304))
+                            elif len(spatial_attribution.shape) == 3:
+                                # Shape might be [C, H, W] - take mean or first channel
+                                if spatial_attribution.shape[0] == 1:
+                                    spatial_attribution = spatial_attribution.squeeze(0).cpu().numpy()
+                                else:
+                                    spatial_attribution = spatial_attribution.mean(0).cpu().numpy()
+                                spatial_attribution = cv2.resize(spatial_attribution, (304, 304))
+                            else:
+                                print(f"Unexpected spatial attribution shape: {spatial_attribution.shape}")
+                                continue
+                            
+                            # Normalize attribution values to [0, 1]
+                            spatial_attribution = (spatial_attribution - spatial_attribution.min()) / (spatial_attribution.max() - spatial_attribution.min())
+                            
+                            vis = show_cam_on_image(rgb_img, spatial_attribution)
+                            vis = np.uint8(255 * vis)
+                            cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_img_{i}_spatial.png', vis)
+                        
+                        # Save original image for reference
+                        cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_img_{i}_original.png', (rgb_img * 255).astype(np.uint8))
+                        
+                    print(f"Generated visualizations for iteration {iteration} with {batch_size_actual} images")
+                
+                elif len(image_t.shape) == 5:  # (batch, seq_len, channels, height, width)
+                    batch_size_actual = min(image_t.shape[0], 2)  # Process fewer due to sequence dimension
+                    seq_len_actual = min(image_t.shape[1], 3)  # Process up to 3 frames per sequence
+                    
+                    for b in range(batch_size_actual):
+                        for s in range(seq_len_actual):
+                            idx = b * seq_len_actual + s
+                            if idx >= 6:  # Limit total visualizations
+                                break
+                                
+                            # Get the image frame from tensor
+                            img_tensor = image_t[b, s]  # (channels, height, width)
+                            
+                            # Convert from tensor to numpy and denormalize
+                            if img_tensor.shape[0] == 3:  # RGB
+                                img_np = img_tensor.permute(1, 2, 0).cpu().numpy()
+                                img_np = (img_np * 255).astype(np.uint8)
+                            else:
+                                img_np = img_tensor.squeeze().cpu().numpy()
+                                img_np = (img_np * 255).astype(np.uint8)
+                            
+                            # Resize to 304x304 for consistency
+                            if len(img_np.shape) == 3:
+                                rgb_img = cv2.resize(img_np, (304, 304)) / 255.0
+                            else:
+                                rgb_img = cv2.resize(img_np, (304, 304))
+                                rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_GRAY2RGB) / 255.0
+                            
+                            # Generate temporal attribution visualization
+                            if idx < cam_t.shape[0]:
+                                transformer_attribution = cam_t[idx]
+                                transformer_attribution = transformer_attribution.reshape(1,1,19,19)
+                                transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
+                                transformer_attribution = transformer_attribution.reshape(304, 304).cpu().numpy()
+                                transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (transformer_attribution.max() - transformer_attribution.min())
+                                
+                                vis = show_cam_on_image(rgb_img, transformer_attribution)
+                                vis = np.uint8(255 * vis)
+                                cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_batch_{b}_seq_{s}_temporal.png', vis)
+                            
+                            # Generate spatial attribution visualization
+                            if idx < cam_s.shape[0]:
+                                spatial_attribution = cam_s[idx]
+                                spatial_attribution = spatial_attribution.reshape(1,1,19,19)
+                                spatial_attribution = torch.nn.functional.interpolate(spatial_attribution, scale_factor=16, mode='bilinear')
+                                spatial_attribution = spatial_attribution.reshape(304, 304).cpu().numpy()
+                                spatial_attribution = (spatial_attribution - spatial_attribution.min()) / (spatial_attribution.max() - spatial_attribution.min())
+                                
+                                vis = show_cam_on_image(rgb_img, spatial_attribution)
+                                vis = np.uint8(255 * vis)
+                                cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_batch_{b}_seq_{s}_spatial.png', vis)
+                            
+                            # Save original image for reference
+                            cv2.imwrite(f'./visualize/faceforensics/iter_{iteration}_batch_{b}_seq_{s}_original.png', (rgb_img * 255).astype(np.uint8))
+                    
+                    print(f"Generated sequence visualizations for iteration {iteration}")
+            
+            if iteration > 10:  # Generate fewer iterations for testing
                 return
             #print(weights)
             #weights = solver[2](feats)

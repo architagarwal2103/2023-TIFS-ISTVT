@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from network.xception import xception, xception_concat
 from network.unet import *
+from network.unet_ import CrossAttentionXception
 import math
 import torchvision
 from efficientnet_pytorch.model import EfficientNet
